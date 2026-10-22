@@ -42,6 +42,7 @@ class Movement:
     flag: str = ""
     native_rate: float | None = field(default=None, repr=False)
     plain: bool = False       # a bare send (no swap/bridge logic ran in the tx)
+    decimals_known: bool = True
 
 
 def slim_tx(tx: dict, chain: str) -> dict:
@@ -83,10 +84,14 @@ def _transfers(tx: dict) -> Iterable[tuple[dict, str, str, int]]:
         if lg.get("event") != "Transfer" or not lg.get("params"):
             continue
         p = lg["params"]
+        if "value" not in p:
+            continue  # ERC-721 (tokenId, no value): not a fungible amount
+        if lg.get("sender_address") in NATIVE_TOKEN_CONTRACTS.get(tx["chain"], ()) and int(tx["value"]) > 0:
+            continue  # chains whose native coin also emits an ERC-20 Transfer: already counted as native
         try:
             raw = int(p.get("value") or 0)
         except (TypeError, ValueError):
-            continue  # ERC-721 style or malformed
+            continue  # malformed
         yield lg, lower(str(p.get("from", ""))), lower(str(p.get("to", ""))), raw
 
 
@@ -106,6 +111,12 @@ def tx_role(tx: dict, address: str) -> str:
 
 
 POLYGON_NATIVE_LOGGER = "0x0000000000000000000000000000000000001010"  # emits LogTransfer on every POL send
+# Native coins that ALSO emit an ERC-20 Transfer log for plain value transfers (double-count risk).
+NATIVE_TOKEN_CONTRACTS = {
+    "celo-mainnet": {"0x471ece3750da237f93b8e339c536989b8978a438"},
+    "zksync-mainnet": {"0x000000000000000000000000000000000000800a"},
+    "metis-mainnet": {"0xdeaddeaddeaddeaddeaddeaddeaddeaddead0000"},
+}
 
 
 def _is_plain(tx: dict, contract: str, counterparty: str) -> bool:
@@ -137,7 +148,8 @@ def movements(tx: dict, address: str) -> list[Movement]:
         dec = lg.get("decimals")
         amt = raw / 10 ** int(dec if dec is not None else 18)
         common = dict(chain=tx["chain"], time=tx["time"], tx_hash=tx["tx_hash"], role=role, signer=tx["from"],
-                      tx_to=tx["to"], asset=str(lg.get("ticker") or lg["sender_address"]), contract=lg["sender_address"], amount=amt)
+                      tx_to=tx["to"], asset=str(lg.get("ticker") or lg["sender_address"]), contract=lg["sender_address"],
+                      amount=amt, decimals_known=dec is not None)
         if t == a:
             out.append(Movement("in", counterparty=f, **common))
         else:
@@ -176,7 +188,7 @@ def apply_prices(moves: list[Movement], prices: dict[tuple[str, str], float],
     stablecoins/majors are trusted at any size (a $256k USDT drain is real)."""
     for m in moves:
         if m.contract == "native":
-            if m.usd is None and m.native_rate:
+            if not m.usd and m.native_rate:  # missing OR zero quote: fall back to the native rate
                 m.usd = m.amount * float(m.native_rate)
         else:
             p = prices.get((m.chain, m.contract))
@@ -187,7 +199,7 @@ def apply_prices(moves: list[Movement], prices: dict[tuple[str, str], float],
             m.flag = SPOOF
         elif m.contract != "native" and m.usd is None and _URLISH.search(m.asset):
             m.flag = SCAM
-        elif m.usd is None:
+        elif m.usd is None or not m.decimals_known:  # unknown decimals = unknown amount
             m.flag = UNPRICED
         elif m.usd > max_usd_per_move and m.contract != "native" and (m.chain, m.contract) not in CANONICAL:
             m.flag = OUTLIER

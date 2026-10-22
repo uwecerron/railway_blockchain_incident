@@ -65,7 +65,10 @@ class Findings:
 def analyze(address: str, txs: list[dict], moves: list[C.Movement]) -> Findings:
     a = address.lower()
     ok = [m for m in moves if m.flag == C.OK]
-    drains_in = [m for m in ok if m.direction == "in" and m.role in VICTIM_ROLES]
+    # dust from vanity twins of the attacker is poisoning, not a victim
+    drains_in = [m for m in ok if m.direction == "in" and m.role in VICTIM_ROLES
+                 and not is_lookalike(m.counterparty, a)]
+    drain_ids = {id(m) for m in drains_in}
 
     # --- per victim --------------------------------------------------------
     vic = defaultdict(lambda: {"chains": set(), "drains": 0, "usd": 0.0, "times": []})
@@ -89,12 +92,11 @@ def analyze(address: str, txs: list[dict], moves: list[C.Movement]) -> Findings:
             p["junk"] += 1
         if m.flag != C.OK:
             continue
-        if m.direction == "in":
+        if id(m) in drain_ids:  # only victim-signed value counts as drained
             p["in"] += m.usd or 0
-            if m.role in VICTIM_ROLES:
-                p["drains"] += 1; p["victims"].add(m.counterparty); p["times"].append(m.time)
-        elif m.role == C.ATTACKER_TX:
-            p["out"] += m.usd or 0
+            p["drains"] += 1; p["victims"].add(m.counterparty); p["times"].append(m.time)
+        elif m.direction == "out" and m.role == C.ATTACKER_TX and m.plain:
+            p["out"] += m.usd or 0  # direct sends only; swap legs would double count
     chains = [ChainRow(ch, p["txs"], p["drains"], len(p["victims"]), round(p["in"], 2), round(p["out"], 2), p["junk"],
                        min(p["times"]) if p["times"] else "", max(p["times"]) if p["times"] else "")
               for ch, p in per.items()]
@@ -176,7 +178,11 @@ def analyze(address: str, txs: list[dict], moves: list[C.Movement]) -> Findings:
     }
 
     usd_in = sum(m.usd or 0 for m in drains_in)
-    usd_out = sum(m.usd or 0 for m in ok if m.direction == "out" and m.role == C.ATTACKER_TX)
+    usd_out = sum(r["usd"] for r in cashout if r["kind"] == "direct_send")
+    victim_set = {v.wallet for v in victims}
+    # verification of "no approve+transferFrom drains": attacker-signed inbound legs pulled from a victim
+    pulls_from_victims = sum(1 for m in ok if m.direction == "in" and m.role == C.ATTACKER_TX
+                             and m.counterparty in victim_set)
 
     # --- poisoning aimed at the attacker: fake "attacker sent X" events -----
     # Bots deploy fake tokens whose Transfer events claim the attacker sent the
@@ -200,7 +206,8 @@ def analyze(address: str, txs: list[dict], moves: list[C.Movement]) -> Findings:
         "victim_wallets": len(victims),
         "drain_transfers": len(drains_in),
         "usd_drained_priced": round(usd_in, 2),
-        "usd_out_priced": round(usd_out, 2),
+        "usd_direct_sends_out": round(usd_out, 2),
+        "attacker_signed_pulls_from_victims": pulls_from_victims,
         "first_drain": times[0].isoformat().replace("+00:00", "Z") if times else None,
         "last_drain": times[-1].isoformat().replace("+00:00", "Z") if times else None,
         "roles": dict(Counter(C.tx_role(t, a) for t in txs)),

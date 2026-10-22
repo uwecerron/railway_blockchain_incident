@@ -53,7 +53,7 @@ def _token_sweep(api: G.Getter, chain: str, addr: str, tx_hash: str) -> str:
     return ""
 
 
-def inspect(api: G.Getter, chain: str, addr: str, attacker: str, after: str = "") -> dict:
+def inspect(api: G.Getter, chain: str, addr: str, attacker: str, after: str = "", prev: str = "") -> dict:
     """Summary + (for small wallets) forwarding, gas top-up and poisoning.
     Only activity at/after `after` (when the traced funds arrived) is considered,
     so a deposit address with years of history is judged on what it did next."""
@@ -61,7 +61,7 @@ def inspect(api: G.Getter, chain: str, addr: str, attacker: str, after: str = ""
             "gas": "", "poison": []}
     try:
         s = G.transactions_summary(api, chain, addr) or {}
-        info["total"] = s.get("total_count", 0)
+        info["total"] = int(s.get("total_count") or 0)
         info["first"] = (s.get("earliest_transaction") or {}).get("block_signed_at")
     except ApiError:
         return info
@@ -72,8 +72,7 @@ def inspect(api: G.Getter, chain: str, addr: str, attacker: str, after: str = ""
             pass
         return info
     try:
-        raw = G.first_page(api, chain, addr) if info["total"] <= 100 else G.latest_page(api, chain, addr)
-        page = sorted((t for t in raw if (t.get("block_signed_at") or "") >= after),
+        page = sorted(G.history_since(api, chain, addr, info["total"], after),
                       key=lambda t: t.get("block_signed_at") or "")
     except ApiError:
         page = []
@@ -83,7 +82,7 @@ def inspect(api: G.Getter, chain: str, addr: str, attacker: str, after: str = ""
         if to == addr and is_lookalike(frm, attacker):  # dust or zero from a vanity twin
             info["poison"].append(frm)
             continue
-        if to == addr and val > 0 and frm != attacker and not info["next"]:
+        if to == addr and val > 0 and frm not in (attacker, prev) and not info["next"]:
             info["gas"] = info["gas"] or frm  # native top-up before a sweep = gas station
         if frm == addr and not info["next"]:
             if val > 0:
@@ -118,7 +117,7 @@ def follow(api: G.Getter, chain: str, start: str, sender: str, usd: float, attac
     hops, addr, prev, depth, seen, when = [], start.lower(), sender.lower(), 1, set(), received_at
     while addr and depth <= max_depth and addr not in seen:
         seen.add(addr)
-        info = inspect(api, chain, addr, attacker, after=when)
+        info = inspect(api, chain, addr, attacker, after=when, prev=prev)
         hops.append(Hop(chain, depth, addr, prev, round(usd, 2), info["total"], info["first"], info["balance"],
                         _verdict(info), info["next"], info["ftx"], when, info["kind"], info["gas"],
                         ",".join(sorted(set(info["poison"])))))

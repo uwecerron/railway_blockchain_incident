@@ -138,7 +138,7 @@ class PaginationTests(unittest.TestCase):
         }
 
         class Api:
-            def get(self, path, params=None, cache=True):
+            def get(self, path, params=None, cache=True, **kw):
                 return pages[int(path.rstrip("/").split("/")[-1])]
 
         since = datetime(2026, 10, 21, tzinfo=timezone.utc)
@@ -151,7 +151,7 @@ class PriceLookupTests(unittest.TestCase):
         good, bad = "0x" + "aa" * 20, "0x" + "ff" * 20
 
         class Api:
-            def get(self, path, params=None, cache=True):
+            def get(self, path, params=None, cache=True, **kw):
                 assert params["from"] == "2026-10-14" and params["to"] == "2026-10-21"
                 if bad in path:
                     raise ApiError(400, path, "Contract address not found")
@@ -168,7 +168,7 @@ class HopTests(unittest.TestCase):
         dep, hot, gas, tok = "0x" + "d1" * 20, "0x" + "e1" * 20, "0x" + "9a" * 20, "0x" + "70" * 20
 
         class Api:
-            def get(self, path, params=None, cache=True):
+            def get(self, path, params=None, cache=True, **kw):
                 if path.endswith("transactions_summary/"):
                     n = 900_000 if hot in path else 4
                     return {"items": [{"total_count": n, "earliest_transaction": {"block_signed_at": "2026-10-21"}}]}
@@ -188,6 +188,47 @@ class HopTests(unittest.TestCase):
         self.assertEqual(hops[0].gas_funder, gas)
         self.assertIn("deposit-address", hops[0].verdict)
         self.assertIn("service", hops[1].verdict)
+
+
+class AuditRegressionTests(unittest.TestCase):
+    def test_nft_transfer_is_not_a_zero_value_drain(self):
+        nft = {"sender_address": "0x" + "4f" * 20, "ticker": "NFT", "decimals": 0, "event": "Transfer",
+               "params": {"from": V1, "to": ATK, "tokenId": "7"}}
+        self.assertEqual(C.movements(tx("eth-mainnet", "t", V1, nft["sender_address"], logs=[nft]), ATK), [])
+
+    def test_celo_native_not_double_counted(self):
+        celo = "0x471ece3750da237f93b8e339c536989b8978a438"
+        t = tx("celo-mainnet", "t", V1, ATK, value=10**18, quote=0.5,
+               logs=[transfer(celo, "CELO", V1, ATK, 10**18, decimals=18)])
+        self.assertEqual(len(C.movements(t, ATK)), 1)
+
+    def test_unknown_decimals_unpriced(self):
+        t = tx("eth-mainnet", "t", V1, USDC, logs=[dict(transfer(USDC, "USDC", V1, ATK, 10**6), decimals=None)])
+        moves = C.movements(t, ATK)
+        C.apply_prices(moves, {("eth-mainnet", USDC): 1.0})
+        self.assertEqual(moves[0].flag, C.UNPRICED)
+
+    def test_zero_native_quote_falls_back_to_rate(self):
+        moves = C.movements(tx("base-mainnet", "t", V1, ATK, value=10**18, quote=0.0, rate=2000.0), ATK)
+        C.apply_prices(moves, {})
+        self.assertEqual(moves[0].usd, 2000.0)
+
+    def test_per_chain_in_counts_only_victim_value(self):
+        swap_back = tx("eth-mainnet", "2026-10-21T21:00:01Z", ATK, ROUTER,
+                       logs=[transfer(USDC, "USDC", ROUTER, ATK, 5_000 * 10**6)])
+        txs = fixture() + [swap_back]
+        moves = [m for t in txs for m in C.movements(t, ATK)]
+        C.apply_prices(moves, {("eth-mainnet", USDC): 1.0})
+        f = F.analyze(ATK, txs, moves)
+        self.assertAlmostEqual(sum(r.usd_in for r in f.chains), f.overview["usd_drained_priced"])
+        self.assertEqual(f.overview["attacker_signed_pulls_from_victims"], 0)
+
+    def test_vanity_twin_dust_is_not_a_victim(self):
+        twin = "0xd97995a8108d5f3a28b0d6ba59d43192c350b2ee"
+        txs = fixture() + [tx("eth-mainnet", "2026-10-21T19:59:00Z", twin, ATK, value=1, quote=0.000001)]
+        moves = [m for t in txs for m in C.movements(t, ATK)]
+        C.apply_prices(moves, {("eth-mainnet", USDC): 1.0})
+        self.assertNotIn(twin, [v.wallet for v in F.analyze(ATK, txs, moves).victims])
 
 
 if __name__ == "__main__":

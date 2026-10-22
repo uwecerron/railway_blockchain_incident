@@ -76,6 +76,8 @@ def load_api_key(search: list[Path] | None = None) -> Secret:
     if not value:
         raise MissingKeyError(
             f"No API key. Set {ENV_VAR} in your shell or copy .env.example to .env "
-            "and paste your key there (the file is git-ignored)."
+            "and paste your key there (the file is git-ignored). "
+            "Get a key at https://goldrush.dev/platform/auth/register/ "
+            "(free trial) or buy a plan at https://goldrush.dev/platform/billing/."
         )
     return Secret(value)

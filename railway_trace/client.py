@@ -90,7 +90,8 @@ class GoldRushClient:
     def __repr__(self) -> str:
         return f"GoldRushClient(base={self._base!r}, key=****)"
 
-    def get(self, path: str, params: Mapping[str, Any] | None = None, cache: bool = True) -> Any:
+    def get(self, path: str, params: Mapping[str, Any] | None = None, cache: bool = True,
+            cache_when: Callable[[Any], bool] | None = None) -> Any:
         """GET `path`; return the `data` member of the JSON envelope."""
         ck = ResponseCache.key(path, params)
         if cache and self._cache is not None:
@@ -132,7 +133,7 @@ class GoldRushClient:
                 msg = body.get("error_message") or "API reported an error"
                 raise ApiError(body.get("error_code") or resp.status_code, path, self._key.redact(str(msg)))
             data = body.get("data", body) if isinstance(body, dict) else body
-            if cache and self._cache is not None:
+            if cache and self._cache is not None and (cache_when is None or cache_when(data)):
                 self._cache.put(ck, data)
             return data
 

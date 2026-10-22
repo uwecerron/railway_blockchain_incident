@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "railway-trace"
+version = "1.1.0"
+description = "Cross-chain wallet-drainer forensics with the Covalent GoldRush API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["requests>=2.31,<3"]
+
+[project.optional-dependencies]
+dev = ["pyflakes>=3"]
+
+[project.scripts]
+railway-trace = "railway_trace.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["railway_trace*"]

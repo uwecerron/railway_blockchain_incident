@@ -129,6 +129,30 @@ class ScanTests(unittest.TestCase):
             Path(d, "notes.md").write_text(f"oops {FAKE}")
             self.assertEqual(scan(Path(d)), ["notes.md"])
 
+    def test_scan_survives_corrupt_gz_symlinks_and_reads_gz_tmp(self):
+        import gzip
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "bad.json.gz").write_bytes(b"\x1f\x8b\x08\x00garbage")
+            os.symlink("/dev/zero", Path(d, "link"))
+            with gzip.open(Path(d, "abc.tmp"), "wt") as fh:
+                fh.write(f"leak {FAKE}")
+            self.assertEqual(scan(Path(d)), ["abc.tmp"])
+
+    def test_scan_finds_key_split_across_chunks(self):
+        from railway_trace import secrets_scan as S
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "big.txt").write_text("x" * (S.CHUNK - 5) + FAKE)
+            self.assertEqual(scan(Path(d)), ["big.txt"])
+
+    def test_empty_price_answers_are_not_cached(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache = ResponseCache(Path(d))
+            c, sess = ClientTests().make([FakeResp(200, {"data": {"items": []}}),
+                                          FakeResp(200, {"data": {"items": []}})], cache=cache)
+            c.get("/v1/p/", cache_when=lambda data: bool(data["items"]))
+            c.get("/v1/p/", cache_when=lambda data: bool(data["items"]))
+            self.assertEqual(len(sess.calls), 2)
+
     def test_repository_is_clean(self):
         root = Path(__file__).resolve().parent.parent
         self.assertEqual(scan(root), [], "a key-shaped string is committed somewhere")

@@ -18,7 +18,7 @@ from .util import iso
 
 
 class Getter(Protocol):
-    def get(self, path: str, params: dict | None = None, cache: bool = True): ...
+    def get(self, path: str, params: dict | None = None, cache: bool = True, cache_when=None): ...
 
 
 @dataclass(frozen=True)
@@ -52,28 +52,56 @@ def iter_transactions(api: Getter, chain: str, address: str, since: datetime,
     if not with_logs:
         params["no-logs"] = "true"
     for page in range(max_pages):
-        data = api.get(f"/v1/{chain}/address/{address}/transactions_v3/page/{page}/", params, cache=False)
+        # complete pages never change, so cache them (cheap resume); the newest page is always refetched
+        data = api.get(f"/v1/{chain}/address/{address}/transactions_v3/page/{page}/", params,
+                       cache_when=_has_next)
         for tx in data.get("items") or []:
             if iso(tx["block_signed_at"]) >= since:
                 yield tx
         if not (data.get("links") or {}).get("next"):
             return
-    raise RuntimeError(f"{chain}: more than {max_pages} pages; raise max_pages")
+    raise ApiError(None, f"/v1/{chain}/address/{address}/transactions_v3/",
+                   f"more than {max_pages} pages; rerun with a larger max_pages")
+
+
+def _has_next(data) -> bool:
+    return bool(((data or {}).get("links") or {}).get("next"))
 
 
 def transactions_summary(api: Getter, chain: str, address: str) -> dict | None:
-    items = api.get(f"/v1/{chain}/address/{address}/transactions_summary/").get("items") or []
+    items = api.get(f"/v1/{chain}/address/{address}/transactions_summary/", cache=False).get("items") or []
     return items[0] if items else None
 
 
 def first_page(api: Getter, chain: str, address: str) -> list[dict]:
     """Oldest page of history without logs (cheap; good for following a hop)."""
-    return api.get(f"/v1/{chain}/address/{address}/transactions_v3/page/0/", {"no-logs": "true"}).get("items") or []
+    return api.get(f"/v1/{chain}/address/{address}/transactions_v3/page/0/", {"no-logs": "true"},
+                   cache_when=_has_next).get("items") or []
+
+
+def page(api: Getter, chain: str, address: str, n: int) -> list[dict]:
+    """Page `n` of history (0 = oldest), without logs."""
+    return api.get(f"/v1/{chain}/address/{address}/transactions_v3/page/{n}/", {"no-logs": "true"},
+                   cache_when=_has_next).get("items") or []
+
+
+def history_since(api: Getter, chain: str, address: str, total: int, after: str, page_size: int = 100,
+                  max_pages: int = 20) -> list[dict]:
+    """Txs at/after `after`, walking back from the newest page so a long-lived
+    address is judged on what it did after the traced funds arrived."""
+    out: list[dict] = []
+    last = max(0, (max(total, 1) - 1) // page_size)
+    for n in range(last, max(-1, last - max_pages), -1):
+        items = page(api, chain, address, n)
+        out += [t for t in items if (t.get("block_signed_at") or "") >= after]
+        if not items or min(t.get("block_signed_at") or "" for t in items) < after:
+            break
+    return out
 
 
 def latest_page(api: Getter, chain: str, address: str) -> list[dict]:
     """Most recent page of history without logs."""
-    return api.get(f"/v1/{chain}/address/{address}/transactions_v3/", {"no-logs": "true"}).get("items") or []
+    return api.get(f"/v1/{chain}/address/{address}/transactions_v3/", {"no-logs": "true"}, cache=False).get("items") or []
 
 
 def transaction(api: Getter, chain: str, tx_hash: str) -> dict | None:
@@ -83,8 +111,13 @@ def transaction(api: Getter, chain: str, tx_hash: str) -> dict | None:
 
 
 def balances_usd(api: Getter, chain: str, address: str) -> float:
-    items = api.get(f"/v1/{chain}/address/{address}/balances_v2/", {"no-spam": "true"}).get("items") or []
+    items = api.get(f"/v1/{chain}/address/{address}/balances_v2/", {"no-spam": "true"}, cache=False).get("items") or []
     return float(sum((i.get("quote") or 0) for i in items))
+
+
+def _has_prices(data) -> bool:
+    items = data if isinstance(data, list) else (data or {}).get("items") or []
+    return any(p.get("price") for it in items for p in (it.get("prices") or []))
 
 
 def historical_prices(api: Getter, chain: str, contracts: list[str], day: str, batch: int = 20,
@@ -99,7 +132,9 @@ def historical_prices(api: Getter, chain: str, contracts: list[str], day: str, b
     out: dict[str, float] = {}
 
     def fetch(chunk: list[str]) -> None:
-        data = api.get(f"/v1/pricing/historical_by_addresses_v2/{chain}/USD/{','.join(chunk)}/", params)
+        # never cache an answer without prices: today's close may simply not be published yet
+        data = api.get(f"/v1/pricing/historical_by_addresses_v2/{chain}/USD/{','.join(chunk)}/", params,
+                       cache_when=_has_prices)
         for it in (data if isinstance(data, list) else (data.get("items") or [])):
             dated = sorted(((p.get("date") or "", p["price"]) for p in (it.get("prices") or [])
                             if p.get("price") and (p.get("date") or "") <= end.isoformat()), reverse=True)

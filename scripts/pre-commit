@@ -1,0 +1,4 @@
+#!/bin/sh
+# Install with:  cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+python3 -m railway_trace scan-secrets || { echo "Commit blocked: an API key was found."; exit 1; }
+python3 -m unittest discover -s tests -t . >/dev/null 2>&1 || { echo "Commit blocked: tests failed."; exit 1; }
